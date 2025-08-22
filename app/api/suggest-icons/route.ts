@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import OpenAI from 'openai'
-import { Ollama } from 'ollama'
+import { GoogleGenerativeAI } from '@google/generative-ai'
 
 // Icon libraries data
 const iconLibraries = {
@@ -74,11 +73,8 @@ const iconLibraries = {
   }
 }
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-})
-
-const ollama = new Ollama({ host: 'http://localhost:11434' })
+// Initialize Gemini AI
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '')
 
 export async function POST(request: NextRequest) {
   let query = ''
@@ -94,29 +90,22 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Try Ollama first (free), then OpenAI, then fallback
-    let aiSuggestions
+    // Try Gemini AI first, then fallback to keyword matching
+    let suggestions
     
-    try {
-      // Try Ollama first (completely free)
-      aiSuggestions = await getOllamaSuggestions(query)
-    } catch (ollamaError) {
-      console.log('Ollama not available, trying OpenAI...')
-      
-      if (process.env.OPENAI_API_KEY) {
-        try {
-          aiSuggestions = await getOpenAISuggestions(query)
-        } catch (openaiError) {
-          console.log('OpenAI failed, using fallback...')
-          aiSuggestions = fallbackIconSearch(query.toLowerCase())
-        }
-      } else {
-        console.log('No OpenAI key, using fallback...')
-        aiSuggestions = fallbackIconSearch(query.toLowerCase())
+    if (process.env.GEMINI_API_KEY) {
+      try {
+        suggestions = await getGeminiSuggestions(query)
+      } catch (geminiError) {
+        console.log('Gemini failed, using fallback...', geminiError)
+        suggestions = fallbackIconSearch(query.toLowerCase())
       }
+    } else {
+      console.log('No Gemini API key, using fallback...')
+      suggestions = fallbackIconSearch(query.toLowerCase())
     }
 
-    return NextResponse.json({ suggestions: aiSuggestions })
+    return NextResponse.json({ suggestions })
 
   } catch (error) {
     console.error('API Error:', error)
@@ -127,40 +116,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-async function getOllamaSuggestions(query: string) {
-  const prompt = `Given the user query "${query}", suggest the most relevant icons from these libraries:
-
-${Object.entries(iconLibraries).map(([key, lib]) => 
-  `${lib.name}: ${lib.icons.map(icon => `${icon.name} (${icon.keywords.join(', ')})`).join(', ')}`
-).join('\n')}
-
-Return a JSON array of the top 6 most relevant icons with this structure:
-[
-  {
-    "name": "icon-name",
-    "library": "Library Name", 
-    "description": "Brief description of why this icon fits the query",
-    "url": "library-base-url"
-  }
-]
-
-Focus on semantic meaning and context, not just keyword matching.`
-
-  const response = await ollama.chat({
-    model: 'llama3.1:8b',
-    messages: [{ role: 'user', content: prompt }],
-  })
-
-  try {
-    const suggestions = JSON.parse(response.message.content)
-    return suggestions.slice(0, 6)
-  } catch (parseError) {
-    console.error('Failed to parse Ollama response:', parseError)
-    return fallbackIconSearch(query.toLowerCase())
-  }
-}
-
-async function getOpenAISuggestions(query: string) {
+async function getGeminiSuggestions(query: string) {
   const prompt = `Given the user query "${query}", suggest the most relevant icons from these libraries:
 
 ${Object.entries(iconLibraries).map(([key, lib]) => 
@@ -179,20 +135,20 @@ Return a JSON array of the top 6 most relevant icons with this structure:
 
 Focus on semantic meaning and context, not just keyword matching.`
 
-  const completion = await openai.chat.completions.create({
-    model: "gpt-3.5-turbo",
-    messages: [{ role: "user", content: prompt }],
-    temperature: 0.3,
-  })
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" })
+  const result = await model.generateContent(prompt)
+  const response = await result.response
+  const text = response.text()
 
   try {
-    const response = completion.choices[0]?.message?.content
-    if (!response) throw new Error('No response from OpenAI')
+    // Clean the response to extract JSON
+    const jsonMatch = text.match(/\[[\s\S]*\]/)
+    if (!jsonMatch) throw new Error('No JSON found in response')
     
-    const suggestions = JSON.parse(response)
-    return suggestions.slice(0, 6) // Limit to 6 suggestions
+    const suggestions = JSON.parse(jsonMatch[0])
+    return suggestions.slice(0, 6)
   } catch (parseError) {
-    console.error('Failed to parse AI response:', parseError)
+    console.error('Failed to parse Gemini response:', parseError)
     return fallbackIconSearch(query.toLowerCase())
   }
 }
